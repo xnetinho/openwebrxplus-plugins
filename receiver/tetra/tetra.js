@@ -7,7 +7,7 @@
  * Requires the xnetinho/openwebrxplus-tetra Docker image (backend decoder).
  *
  * Load via init.js:
- *   await Plugins.load('https://xnetinho.github.io/openwebrxplus-docker-builder/plugins/receiver/tetra/tetra.js');
+ *   await Plugins.load('https://xnetinho.github.io/openwebrxplus-plugins/receiver/tetra/tetra.js');
  *
  * License: MIT
  * Copyright (c) 2026 xnetinho
@@ -18,7 +18,7 @@
  *    DCONNECTDEC, DTXGRANTDEC, DRELEASEDEC, DSTATUSDEC, SDSDEC, BURST
  *  - granular per-type rate limiting in backend
  *  - two-stage codec (cdecoder | sdecoder) in backend
- *  - GNURadio pi/4-DQPSK demodulation stage connected to tetra-rx
+ *  - pi/4-DQPSK demodulation via numpy (no GNURadio required)
  *  - new panel fields: Location Area (LA), encryption mode (TEA1/2/3),
  *    network name map, status messages, SDS messages
  *  - panel layout expanded proportionally to data; no overflow
@@ -50,7 +50,7 @@ Plugins.tetra.init = function () {
 	return true;
 };
 
-// ── Panel HTML injection ───────────────────────────────────────────────────────
+// ── Panel HTML injection ────────────────────────────────────────────────────
 
 Plugins.tetra._injectPanel = function () {
 	if (document.getElementById('openwebrx-panel-metadata-tetra')) return;
@@ -149,11 +149,11 @@ Plugins.tetra._injectPanel = function () {
 	}
 };
 
-// ── MetaPanel subclass ─────────────────────────────────────────────────────────
+// ── MetaPanel subclass ─────────────────────────────────────────────────────
 
 Plugins.tetra._registerMetaPanel = function () {
 
-	// ── TetraMetaSlot ──────────────────────────────────────────────────────────
+	// ── TetraMetaSlot ─────────────────────────────────────────────────────
 
 	function TetraMetaSlot(el) {
 		this.el = $(el);
@@ -194,7 +194,7 @@ Plugins.tetra._registerMetaPanel = function () {
 		$('#tetra-s' + this.idx + '-' + field).text(value);
 	};
 
-	// ── TetraMetaPanel ─────────────────────────────────────────────────────────
+	// ── TetraMetaPanel ──────────────────────────────────────────────────
 
 	function TetraMetaPanel($el) {
 		MetaPanel.call(this, $el);
@@ -251,12 +251,12 @@ Plugins.tetra._registerMetaPanel = function () {
 			}
 
 		} else if (type === 'status') {
-			var stxt = (data.issi || '?') + ' \u2192 ' + (data.to || '?') + ': Status ' + (data.status || '?');
+			var stxt = (data.issi || '?') + ' → ' + (data.to || '?') + ': Status ' + (data.status || '?');
 			$('#tetra-last-status').text(stxt);
 			$('#tetra-status-section').show();
 
 		} else if (type === 'sds') {
-			var sdstxt = (data.from || '?') + ' \u2192 ' + (data.to || '?') + ': ' + (data.text || '');
+			var sdstxt = (data.from || '?') + ' → ' + (data.to || '?') + ': ' + (data.text || '');
 			$('#tetra-last-sds').text(sdstxt);
 			$('#tetra-sds-section').show();
 		}
@@ -280,7 +280,7 @@ Plugins.tetra._registerMetaPanel = function () {
 		}
 	};
 
-	// ── Register ───────────────────────────────────────────────────────────────
+	// ── Register ───────────────────────────────────────────────────────
 
 	MetaPanel.types['tetra'] = TetraMetaPanel;
 
@@ -290,7 +290,7 @@ Plugins.tetra._registerMetaPanel = function () {
 	}
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 Plugins.tetra._formatFreq = function (hz) {
 	if (!hz) return '---';
