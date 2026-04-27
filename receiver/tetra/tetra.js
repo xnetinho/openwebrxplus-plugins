@@ -154,6 +154,52 @@ Plugins.tetra._injectPanel = function () {
 			document.body.insertAdjacentHTML('beforeend', html);
 		}
 	}
+
+	var panelEl = document.getElementById('openwebrx-panel-metadata-tetra');
+	if (panelEl) {
+		panelEl.addEventListener('transitionend', function(ev) {
+			if (ev.target !== this) return;
+			this.style.transitionDuration = null;
+			this.style.transitionProperty = null;
+			if (this.movement && this.movement === 'collapse') {
+				this.style.display = 'none';
+			}
+			delete this.movement;
+		});
+	}
+
+	Plugins.tetra._clearPanel = function() {
+		try {
+			var panel = $('#openwebrx-panel-metadata-tetra');
+			var instance = panel.data('metapanel');
+			if (instance && typeof instance.clear === 'function') {
+				instance.clear();
+			}
+		} catch (e) {}
+	};
+
+	if (!Plugins.tetra._isUiHooked) {
+		// Hook high-level UI functions
+		Plugins.utils.wrap_func('setFrequency', function() {
+			Plugins.tetra._clearPanel();
+			return true;
+		}, null, UI);
+
+		Plugins.utils.wrap_func('setOffsetFrequency', function() {
+			Plugins.tetra._clearPanel();
+			return true;
+		}, null, UI);
+
+		// Hook low-level Demodulator function (catches waterfall wheel, dragging, etc.)
+		if (typeof Demodulator !== 'undefined' && Demodulator.prototype) {
+			Plugins.utils.wrap_func('set_offset_frequency', function() {
+				Plugins.tetra._clearPanel();
+				return true;
+			}, null, Demodulator.prototype);
+		}
+
+		Plugins.tetra._isUiHooked = true;
+	}
 };
 
 // ── MetaPanel subclass ─────────────────────────────────────────────────────────
