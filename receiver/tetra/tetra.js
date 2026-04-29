@@ -1,55 +1,41 @@
 /*
- * tetra Receiver Plugin for OpenWebRX+ — v1.2
+ * tetra Receiver Plugin for OpenWebRX+ — v1.3
  *
  * Displays TETRA (Terrestrial Trunked Radio) signaling metadata:
  * network info, encryption mode (TEA1/2/3), 4 TDMA timeslots,
  * status and SDS messages.
  *
- * Requires the xnetinho/openwebrxplus-tetra Docker image (backend decoder).
+ * Encryption semantics (v1.3):
+ *   - Cell security class (TEA capability advertised by the BS) is shown
+ *     as an amber informational badge when no call is active.
+ *   - Active call encryption (from Basicinfo encryption_mode bits) is
+ *     shown in red when a call is actually encrypted.
+ *   - A clear call on a TEA-capable cell shows green 'Clear (SC TEAn)'.
  *
- * Load via init.js:
- *   await Plugins.load('https://xnetinho.github.io/openwebrxplus-docker-builder/plugins/receiver/tetra/tetra.js');
+ * Requires the xnetinho/openwebrxplus-tetra Docker image (backend decoder).
  *
  * License: MIT
  * Copyright (c) 2026 xnetinho
- *
- * Changes:
- * 1.2:
- *  - receives encryption_type from backend (TEA1/TEA2/TEA3/none)
- *  - STATUS and SDS moved into SIGNAL column
- *  - fixed-width columns to prevent layout dancing
- *  - improved _setEnc to use encryption_type field
- * 1.1:
- *  - robust TETMON parser, GNURadio demod, codec pipeline
- * 1.0:
- *  - initial release
  */
 
 Plugins.tetra = Plugins.tetra || {};
-Plugins.tetra._version = 1.2;
+Plugins.tetra._version = 1.3;
 
-/*
- * Optional network name map: add entries as 'MCC-MNC': 'Name'.
- * Example: Plugins.tetra.networkNames['724-05'] = 'TIM Brasil';
- */
 Plugins.tetra.networkNames = {};
 
 Plugins.tetra.init = function () {
-
 	if (!Plugins.isLoaded('utils', 0.1)) {
 		console.error('[tetra] plugin requires "utils >= 0.1".');
 		return false;
 	}
-
 	Plugins.utils.on_ready(function () {
 		Plugins.tetra._injectPanel();
 		Plugins.tetra._registerMetaPanel();
 	});
-
 	return true;
 };
 
-// ── Panel HTML injection ───────────────────────────────────────────────────────
+// ── Panel HTML injection ──────────────────────────────────────────────────────────────
 
 Plugins.tetra._injectPanel = function () {
 	if (document.getElementById('openwebrx-panel-metadata-tetra')) return;
@@ -88,7 +74,6 @@ Plugins.tetra._injectPanel = function () {
 			'style="display:none" ' +
 			'data-panel-name="metadata-tetra">' +
 
-			/* ── Coluna 1: NETWORK ─────────────────────────────── */
 			'<div class="tetra-section tetra-col-network">' +
 				'<div class="tetra-section-title">Network</div>' +
 				'<div class="tetra-grid">' +
@@ -109,7 +94,6 @@ Plugins.tetra._injectPanel = function () {
 				'</div>' +
 			'</div>' +
 
-			/* ── Coluna 2: SIGNAL + STATUS + SDS ───────────────── */
 			'<div class="tetra-section tetra-col-signal">' +
 				'<div class="tetra-section-title">Signal</div>' +
 				'<div class="tetra-signal-grid">' +
@@ -118,29 +102,22 @@ Plugins.tetra._injectPanel = function () {
 					'<span class="tetra-key">Bursts/s</span>' +
 					'<span class="tetra-val" id="tetra-burst-rate">---</span>' +
 				'</div>' +
-
-				/* STATUS dentro de SIGNAL */
 				'<div id="tetra-status-block" style="display:none">' +
 					'<div class="tetra-signal-separator"></div>' +
 					'<div class="tetra-signal-subtitle">Status</div>' +
 					'<div class="tetra-status-line" id="tetra-last-status">---</div>' +
 				'</div>' +
-
-				/* SDS dentro de SIGNAL */
 				'<div id="tetra-sds-block" style="display:none">' +
 					'<div class="tetra-signal-separator"></div>' +
 					'<div class="tetra-signal-subtitle">SDS</div>' +
 					'<div class="tetra-sds-line" id="tetra-last-sds">---</div>' +
 				'</div>' +
-
 			'</div>' +
 
-			/* ── Coluna 3: TIMESLOTS ───────────────────────────── */
 			'<div class="tetra-section tetra-col-timeslots">' +
 				'<div class="tetra-section-title">Timeslots</div>' +
 				slots +
 			'</div>' +
-
 		'</div>';
 
 	var dmr = document.getElementById('openwebrx-panel-metadata-dmr');
@@ -179,34 +156,27 @@ Plugins.tetra._injectPanel = function () {
 	};
 
 	if (!Plugins.tetra._isUiHooked) {
-		// Hook high-level UI functions
 		Plugins.utils.wrap_func('setFrequency', function() {
 			Plugins.tetra._clearPanel();
 			return true;
 		}, null, UI);
-
 		Plugins.utils.wrap_func('setOffsetFrequency', function() {
 			Plugins.tetra._clearPanel();
 			return true;
 		}, null, UI);
-
-		// Hook low-level Demodulator function (catches waterfall wheel, dragging, etc.)
 		if (typeof Demodulator !== 'undefined' && Demodulator.prototype) {
 			Plugins.utils.wrap_func('set_offset_frequency', function() {
 				Plugins.tetra._clearPanel();
 				return true;
 			}, null, Demodulator.prototype);
 		}
-
 		Plugins.tetra._isUiHooked = true;
 	}
 };
 
-// ── MetaPanel subclass ─────────────────────────────────────────────────────────
+// ── MetaPanel subclass ──────────────────────────────────────────────────────────────────
 
 Plugins.tetra._registerMetaPanel = function () {
-
-	// ── TetraMetaSlot ──────────────────────────────────────────────────────────
 
 	function TetraMetaSlot(el) {
 		this.el = $(el);
@@ -215,7 +185,6 @@ Plugins.tetra._registerMetaPanel = function () {
 
 	TetraMetaSlot.prototype.update = function (data) {
 		var callType = (data.call_type || 'group').toLowerCase();
-
 		this.el.addClass('active').removeClass('groupcall directcall emergency');
 		if (callType.indexOf('individual') >= 0 || callType.indexOf('direct') >= 0) {
 			this.el.addClass('directcall');
@@ -224,13 +193,11 @@ Plugins.tetra._registerMetaPanel = function () {
 		} else {
 			this.el.addClass('groupcall');
 		}
-
 		if (data.encrypted) {
 			this.el.addClass('encrypted');
 		} else {
 			this.el.removeClass('encrypted');
 		}
-
 		this._set('issi', data.issi || '---');
 		this._set('gssi', data.gssi || '---');
 		this._set('type', callType || '---');
@@ -247,14 +214,15 @@ Plugins.tetra._registerMetaPanel = function () {
 		$('#tetra-s' + this.idx + '-' + field).text(value);
 	};
 
-	// ── TetraMetaPanel ─────────────────────────────────────────────────────────
-
 	function TetraMetaPanel($el) {
 		MetaPanel.call(this, $el);
 		this.modes = ['TETRA'];
 		this.slots = this.el.find('.openwebrx-tetra-slot').toArray().map(function (el) {
 			return new TetraMetaSlot(el);
 		});
+		// Tracks cell-level TEA advertisement (from NETINFO1/ENCINFO1)
+		this._cellTea = 'none';
+		this._cellSc  = 0;
 	}
 
 	TetraMetaPanel.prototype = Object.create(MetaPanel.prototype);
@@ -275,14 +243,21 @@ Plugins.tetra._registerMetaPanel = function () {
 			$('#tetra-dl').text(Plugins.tetra._formatFreq(data.dl_freq));
 			$('#tetra-ul').text(Plugins.tetra._formatFreq(data.ul_freq));
 			$('#tetra-cc').text(data.color_code !== undefined && data.color_code !== '' ? data.color_code : '---');
-			Plugins.tetra._setEnc(data.encrypted, data.encryption_type);
+			// Store cell-level security class; badge stays in cell-capability
+			// state until an actual encrypted call changes it.
+			this._cellSc  = data.cell_security_class || 0;
+			this._cellTea = data.cell_tea || 'none';
+			Plugins.tetra._setEnc(false, 'none', this._cellTea);
 
 		} else if (type === 'freqinfo') {
 			$('#tetra-dl').text(Plugins.tetra._formatFreq(data.dl_freq));
 			$('#tetra-ul').text(Plugins.tetra._formatFreq(data.ul_freq));
 
 		} else if (type === 'encinfo') {
-			Plugins.tetra._setEnc(data.encrypted, data.enc_mode);
+			// Cell-level capability update only — never mark active encryption.
+			this._cellSc  = data.cell_security_class || this._cellSc;
+			this._cellTea = data.cell_tea || this._cellTea;
+			Plugins.tetra._setEnc(false, 'none', this._cellTea);
 
 		} else if (type === 'burst') {
 			$('#tetra-afc').text(data.afc !== undefined ? data.afc : '---');
@@ -297,23 +272,25 @@ Plugins.tetra._registerMetaPanel = function () {
 			if (si2 >= 0 && si2 < this.slots.length) {
 				this.slots[si2].update(data);
 			}
+			// Drive panel encryption badge from per-call Basicinfo enc mode.
+			Plugins.tetra._setEnc(!!data.encrypted, data.encryption_type || 'none', this._cellTea);
 
 		} else if (type === 'call_release') {
 			for (var i = 0; i < this.slots.length; i++) {
 				this.slots[i].clear();
 			}
+			// Revert to cell-capability badge after call ends.
+			Plugins.tetra._setEnc(false, 'none', this._cellTea);
 
 		} else if (type === 'status') {
-			var ssiFrom = data.ssi || '?';
-			var ssiTo   = data.ssi2 || '?';
-			var stxt = ssiFrom + ' \u2192 ' + ssiTo + '  Status ' + (data.status || '?');
+			var stxt = (data.ssi || '?') + ' → ' + (data.ssi2 || '?') + '  Status ' + (data.status || '?');
 			$('#tetra-last-status').text(stxt);
 			$('#tetra-status-block').show();
 
 		} else if (type === 'sds') {
 			var from = data.ssi || data.from || '?';
 			var to   = data.ssi2 || data.to || '?';
-			var sdstxt = from + ' \u2192 ' + to + ': ' + (data.text || '');
+			var sdstxt = from + ' → ' + to + ': ' + (data.text || '');
 			$('#tetra-last-sds').text(sdstxt);
 			$('#tetra-sds-block').show();
 		}
@@ -327,19 +304,19 @@ Plugins.tetra._registerMetaPanel = function () {
 		$('#tetra-dl').text('---');
 		$('#tetra-ul').text('---');
 		$('#tetra-cc').text('---');
-		$('#tetra-enc').text('---').removeClass('enc-yes enc-no enc-tea');
+		$('#tetra-enc').text('---').removeClass('enc-yes enc-no enc-tea enc-cell');
 		$('#tetra-afc').text('---');
 		$('#tetra-burst-rate').text('---');
 		$('#tetra-last-status').text('---');
 		$('#tetra-status-block').hide();
 		$('#tetra-last-sds').text('---');
 		$('#tetra-sds-block').hide();
+		this._cellTea = 'none';
+		this._cellSc  = 0;
 		for (var i = 0; i < this.slots.length; i++) {
 			this.slots[i].clear();
 		}
 	};
-
-	// ── Register ───────────────────────────────────────────────────────────────
 
 	MetaPanel.types['tetra'] = TetraMetaPanel;
 
@@ -349,7 +326,7 @@ Plugins.tetra._registerMetaPanel = function () {
 	}
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────────────
 
 Plugins.tetra._formatFreq = function (hz) {
 	if (!hz) return '---';
@@ -359,33 +336,37 @@ Plugins.tetra._formatFreq = function (hz) {
 };
 
 /**
- * Atualiza o badge de criptografia.
+ * Update the encryption badge.
  *
- * @param {boolean} encrypted  - se a rede usa criptografia
- * @param {string}  encType    - valor do campo encryption_type do backend:
- *                               "TEA1", "TEA2", "TEA3", "none",
- *                               ou enc_mode hex do ENCINFO1 (ex: "05")
+ * @param {boolean} encrypted  - true when the active call is encrypted
+ * @param {string}  encType    - active call encryption type: 'TEA1' / 'TEA2' /
+ *                               'TEA3' / 'none'
+ * @param {string}  cellTea    - cell-level TEA capability advertised in
+ *                               NETINFO1/ENCINFO1: 'TEA1' / 'TEA2' / 'TEA3' /
+ *                               'none'. Used to show an informational badge
+ *                               when no call is actively encrypted.
  */
-Plugins.tetra._setEnc = function (encrypted, encType) {
+Plugins.tetra._setEnc = function (encrypted, encType, cellTea) {
 	var $el = $('#tetra-enc');
-	$el.removeClass('enc-yes enc-no enc-tea');
+	$el.removeClass('enc-yes enc-no enc-tea enc-cell');
 
-	if (!encrypted) {
-		$el.text('No').addClass('enc-no');
+	if (encrypted) {
+		// Active call is encrypted.
+		var label = (encType || '').toUpperCase();
+		if (label.indexOf('TEA') === 0) {
+			$el.text(label + ' (active)').addClass('enc-tea');
+		} else {
+			$el.text('ENC ' + (label || 'YES')).addClass('enc-yes');
+		}
 		return;
 	}
 
-	/* Se o backend envia encryption_type como "TEA1", "TEA2", "TEA3" */
-	if (encType && encType !== 'none' && encType !== 'None' && encType !== '00') {
-		/* Normaliza: garante formato "TEAn" */
-		var label = encType.toUpperCase();
-		if (label.indexOf('TEA') === 0) {
-			$el.text(label).addClass('enc-tea');
-		} else {
-			/* enc_mode hex do ENCINFO1 (ex: "05") — mostra raw */
-			$el.text('ENC 0x' + label).addClass('enc-tea');
-		}
+	// Active call is clear (or no call). Show cell capability if any.
+	var ct = (cellTea || 'none').toUpperCase();
+	if (ct !== 'NONE' && ct !== '') {
+		// Cell advertises TEA capability but this call is in clear.
+		$el.text('Clear (SC ' + ct + ')').addClass('enc-cell');
 	} else {
-		$el.text('YES').addClass('enc-yes');
+		$el.text('Clear').addClass('enc-no');
 	}
 };
