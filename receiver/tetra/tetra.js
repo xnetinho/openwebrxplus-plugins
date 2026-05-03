@@ -1,15 +1,23 @@
 /*
- * tetra Receiver Plugin for OpenWebRX+ — v1.3
+ * tetra Receiver Plugin for OpenWebRX+ — v1.5
  *
  * Displays TETRA (Terrestrial Trunked Radio) signaling metadata:
  * network info, encryption mode (TEA1/2/3), 4 TDMA timeslots,
  * status and SDS messages.
  *
- * Encryption semantics (v1.3):
+ * v1.5 fix: timeslot indicators now reflect data.timeslots dict
+ * emitted by the backend (was reading non-existent data.slot which
+ * defaulted to 0 → only TS1 ever lit). Call data is routed to the
+ * timeslot(s) currently flagged 'assigned' in the most recent burst
+ * event. Slot field mapping aligned with backend payload (data.ssi
+ * is GSSI, data.ssi2 is ISSI, matching TETMON convention used by
+ * upstream osmo-tetra-sq5bpf).
+ *
+ * Encryption semantics (v1.3+):
  *   - Cell security class (TEA capability advertised by the BS) is shown
  *     as an amber informational badge when no call is active.
- *   - Active call encryption (from Basicinfo encryption_mode bits) is
- *     shown in red when a call is actually encrypted.
+ *   - Active call encryption (from per-call ENCR field) is shown
+ *     in red when a call is actually encrypted.
  *   - A clear call on a TEA-capable cell shows green 'Clear (SC TEAn)'.
  *
  * Requires the xnetinho/openwebrxplus-tetra Docker image (backend decoder).
@@ -19,7 +27,7 @@
  */
 
 Plugins.tetra = Plugins.tetra || {};
-Plugins.tetra._version = 1.3;
+Plugins.tetra._version = 1.5;
 
 Plugins.tetra.networkNames = {};
 
@@ -198,9 +206,23 @@ Plugins.tetra._registerMetaPanel = function () {
 		} else {
 			this.el.removeClass('encrypted');
 		}
-		this._set('issi', data.issi || '---');
-		this._set('gssi', data.gssi || '---');
+		// Backend uses TETMON convention: ssi = address from MAC RESOURCE
+		// (= GSSI for group calls), ssi2 = ISSI of subscriber when present.
+		this._set('issi', data.ssi2 || data.issi || '---');
+		this._set('gssi', data.ssi  || data.gssi || '---');
 		this._set('type', callType || '---');
+	};
+
+	TetraMetaSlot.prototype.setBusy = function () {
+		// Mark slot as carrying traffic (from burst.timeslots = "assigned")
+		// without overwriting any existing call data.
+		this.el.addClass('active');
+	};
+
+	TetraMetaSlot.prototype.setIdle = function () {
+		// Mark slot as not carrying traffic right now. Keep the most recent
+		// call data visible (it may be a brief gap inside an ongoing call).
+		this.el.removeClass('active');
 	};
 
 	TetraMetaSlot.prototype.clear = function () {
@@ -223,10 +245,25 @@ Plugins.tetra._registerMetaPanel = function () {
 		// Tracks cell-level TEA advertisement (from NETINFO1/ENCINFO1)
 		this._cellTea = 'none';
 		this._cellSc  = 0;
+		// Most recent burst.timeslots dict, used to route incoming call_*
+		// events to the actually-assigned slots (the backend doesn't tag
+		// each call with a TN, so we correlate via the last burst).
+		this._lastTimeslots = {};
 	}
 
 	TetraMetaPanel.prototype = Object.create(MetaPanel.prototype);
 	TetraMetaPanel.prototype.constructor = TetraMetaPanel;
+
+	TetraMetaPanel.prototype._assignedSlots = function () {
+		var tns = [];
+		for (var k in this._lastTimeslots) {
+			if (this._lastTimeslots[k] === 'assigned') {
+				var idx = parseInt(k, 10);
+				if (idx >= 1 && idx <= 4) tns.push(idx);
+			}
+		}
+		return tns;
+	};
 
 	TetraMetaPanel.prototype.update = function (data) {
 		if (!this.isSupported(data)) return;
@@ -243,8 +280,6 @@ Plugins.tetra._registerMetaPanel = function () {
 			$('#tetra-dl').text(Plugins.tetra._formatFreq(data.dl_freq));
 			$('#tetra-ul').text(Plugins.tetra._formatFreq(data.ul_freq));
 			$('#tetra-cc').text(data.color_code !== undefined && data.color_code !== '' ? data.color_code : '---');
-			// Store cell-level security class; badge stays in cell-capability
-			// state until an actual encrypted call changes it.
 			this._cellSc  = data.cell_security_class || 0;
 			this._cellTea = data.cell_tea || 'none';
 			Plugins.tetra._setEnc(false, 'none', this._cellTea);
@@ -254,7 +289,6 @@ Plugins.tetra._registerMetaPanel = function () {
 			$('#tetra-ul').text(Plugins.tetra._formatFreq(data.ul_freq));
 
 		} else if (type === 'encinfo') {
-			// Cell-level capability update only — never mark active encryption.
 			this._cellSc  = data.cell_security_class || this._cellSc;
 			this._cellTea = data.cell_tea || this._cellTea;
 			Plugins.tetra._setEnc(false, 'none', this._cellTea);
@@ -262,24 +296,42 @@ Plugins.tetra._registerMetaPanel = function () {
 		} else if (type === 'burst') {
 			$('#tetra-afc').text(data.afc !== undefined ? data.afc : '---');
 			$('#tetra-burst-rate').text(data.burst_rate || '---');
-			var si = (data.slot || 0);
-			if (si >= 0 && si < this.slots.length) {
-				this.slots[si].el.addClass('active');
+
+			// Bug-fix v1.5: backend emits `data.timeslots` as a dict
+			// {"1":"assigned","2":"unallocated",...}. Old code read
+			// `data.slot` which never existed and always defaulted to 0,
+			// so only TS1 ever lit. Iterate the dict and toggle the
+			// busy/idle ('active') class per slot.
+			if (data.timeslots) {
+				this._lastTimeslots = data.timeslots;
+				for (var tn in data.timeslots) {
+					var idx = parseInt(tn, 10);
+					if (idx < 1 || idx > 4) continue;
+					var slot = this.slots[idx - 1];
+					var usage = data.timeslots[tn];
+					if (usage === 'assigned') {
+						slot.setBusy();
+					} else if (usage === 'unallocated') {
+						slot.setIdle();
+					}
+				}
 			}
 
 		} else if (type === 'call_setup' || type === 'call_connect' || type === 'tx_grant') {
-			var si2 = (data.slot || 0);
-			if (si2 >= 0 && si2 < this.slots.length) {
-				this.slots[si2].update(data);
+			// Bug-fix v1.5: backend doesn't tag calls with TN. Route the
+			// call to whichever slot(s) are currently flagged 'assigned'
+			// in the latest burst. Fallback to TS1 if none seen yet.
+			var targets = this._assignedSlots();
+			if (targets.length === 0) targets = [1];
+			for (var t = 0; t < targets.length; t++) {
+				this.slots[targets[t] - 1].update(data);
 			}
-			// Drive panel encryption badge from per-call Basicinfo enc mode.
 			Plugins.tetra._setEnc(!!data.encrypted, data.encryption_type || 'none', this._cellTea);
 
 		} else if (type === 'call_release') {
 			for (var i = 0; i < this.slots.length; i++) {
 				this.slots[i].clear();
 			}
-			// Revert to cell-capability badge after call ends.
 			Plugins.tetra._setEnc(false, 'none', this._cellTea);
 
 		} else if (type === 'status') {
@@ -313,6 +365,7 @@ Plugins.tetra._registerMetaPanel = function () {
 		$('#tetra-sds-block').hide();
 		this._cellTea = 'none';
 		this._cellSc  = 0;
+		this._lastTimeslots = {};
 		for (var i = 0; i < this.slots.length; i++) {
 			this.slots[i].clear();
 		}
@@ -351,7 +404,6 @@ Plugins.tetra._setEnc = function (encrypted, encType, cellTea) {
 	$el.removeClass('enc-yes enc-no enc-tea enc-cell');
 
 	if (encrypted) {
-		// Active call is encrypted.
 		var label = (encType || '').toUpperCase();
 		if (label.indexOf('TEA') === 0) {
 			$el.text(label + ' (active)').addClass('enc-tea');
@@ -361,10 +413,8 @@ Plugins.tetra._setEnc = function (encrypted, encType, cellTea) {
 		return;
 	}
 
-	// Active call is clear (or no call). Show cell capability if any.
 	var ct = (cellTea || 'none').toUpperCase();
 	if (ct !== 'NONE' && ct !== '') {
-		// Cell advertises TEA capability but this call is in clear.
 		$el.text('Clear (SC ' + ct + ')').addClass('enc-cell');
 	} else {
 		$el.text('Clear').addClass('enc-no');
