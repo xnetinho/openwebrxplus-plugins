@@ -1,15 +1,26 @@
 /*
- * tetra Receiver Plugin for OpenWebRX+ — v1.4
+ * tetra Receiver Plugin for OpenWebRX+ — v1.6
  *
- * Encryption display split into two distinct fields:
+ * v1.6 = v1.4 (main) + v1.5 (Bug 16) merged.
+ *   v1.4 features: separate Cell Sec / Encryption fields, idle state,
+ *                  Plugins.tetra.statusNames, _fmtStatus/_fmtSds.
+ *   v1.5 (Bug 16) fixes:
+ *     - burst handler iterates data.timeslots dict (was reading
+ *       data.slot which didn't exist; only TS1 ever lit).
+ *     - call_setup/call_connect/tx_grant routed to slot(s) marked
+ *       'assigned' in the most recent burst (was hardcoded to TS1).
+ *     - TetraMetaSlot.update reads data.ssi (= GSSI) and data.ssi2
+ *       (= ISSI), matching the TETMON convention used by the backend.
+ *
+ * Encryption display:
  *   - Cell Sec.  : TEA capability advertised by the BS (NETINFO1 CRYPT).
  *                  Informational only — amber when set, dimmed when none.
- *   - Encryption : actual per-call encryption from Basicinfo enc_mode bits.
- *                  Red 'TEA2 (active)' when encrypted, green 'Clear' during
- *                  a clear call, dimmed 'idle' when no call is active.
+ *   - Encryption : actual per-call encryption from ENCR field.
+ *                  Red 'TEA2 (active)' when encrypted, green 'Clear'
+ *                  during a clear call, dimmed 'idle' when no call.
  *
- * STATUS / SDS panels are always visible. Empty default '---'. ssi2=0 is
- * rendered as 'broadcast' (TETRA destination 0 means open broadcast).
+ * STATUS / SDS panels are always visible, default '---'. ssi2=0 is
+ * rendered as 'broadcast' (TETRA destination 0 = open broadcast).
  *
  * Optional: populate Plugins.tetra.statusNames = {528: 'PTT timeout', ...}
  * to map operator-specific D-STATUS codes to friendly labels.
@@ -18,7 +29,7 @@
  */
 
 Plugins.tetra = Plugins.tetra || {};
-Plugins.tetra._version = 1.4;
+Plugins.tetra._version = 1.6;
 Plugins.tetra.networkNames = {};
 Plugins.tetra.statusNames  = {};
 
@@ -132,9 +143,19 @@ Plugins.tetra._registerMetaPanel = function () {
 		else if (callType.indexOf('emergency') >= 0) this.el.addClass('emergency');
 		else this.el.addClass('groupcall');
 		if (data.encrypted) this.el.addClass('encrypted'); else this.el.removeClass('encrypted');
-		this._set('issi', data.issi || '---');
-		this._set('gssi', data.gssi || '---');
+		// Bug 16 fix: backend follows TETMON convention — `ssi` = MAC RESOURCE
+		// address (= GSSI for group calls), `ssi2` = ISSI when present.
+		this._set('issi', data.ssi2 || data.issi || '---');
+		this._set('gssi', data.ssi  || data.gssi || '---');
 		this._set('type', callType || '---');
+	};
+
+	TetraMetaSlot.prototype.setBusy = function () {
+		this.el.addClass('active');
+	};
+
+	TetraMetaSlot.prototype.setIdle = function () {
+		this.el.removeClass('active');
 	};
 
 	TetraMetaSlot.prototype.clear = function () {
@@ -150,10 +171,24 @@ Plugins.tetra._registerMetaPanel = function () {
 		MetaPanel.call(this, $el);
 		this.modes = ['TETRA'];
 		this.slots = this.el.find('.openwebrx-tetra-slot').toArray().map(function (el) { return new TetraMetaSlot(el); });
+		// Bug 16: track latest burst.timeslots so call_* events can be
+		// routed to the slot(s) currently flagged 'assigned'.
+		this._lastTimeslots = {};
 	}
 
 	TetraMetaPanel.prototype = Object.create(MetaPanel.prototype);
 	TetraMetaPanel.prototype.constructor = TetraMetaPanel;
+
+	TetraMetaPanel.prototype._assignedSlots = function () {
+		var tns = [];
+		for (var k in this._lastTimeslots) {
+			if (this._lastTimeslots[k] === 'assigned') {
+				var idx = parseInt(k, 10);
+				if (idx >= 1 && idx <= 4) tns.push(idx);
+			}
+		}
+		return tns;
+	};
 
 	TetraMetaPanel.prototype.update = function (data) {
 		if (!this.isSupported(data)) return;
@@ -180,12 +215,33 @@ Plugins.tetra._registerMetaPanel = function () {
 		} else if (type === 'burst') {
 			$('#tetra-afc').text(data.afc !== undefined ? data.afc : '---');
 			$('#tetra-burst-rate').text(data.burst_rate || '---');
-			var si = (data.slot || 0);
-			if (si >= 0 && si < this.slots.length) this.slots[si].el.addClass('active');
+
+			// Bug 16 fix: backend emits `data.timeslots` as a dict
+			// {"1":"assigned","2":"unallocated",...}. Old code read
+			// `data.slot` which never existed (always defaulted to 0
+			// → only TS1 ever lit). Iterate the dict and toggle the
+			// 'active' class per slot.
+			if (data.timeslots) {
+				this._lastTimeslots = data.timeslots;
+				for (var tn in data.timeslots) {
+					var idx = parseInt(tn, 10);
+					if (idx < 1 || idx > 4) continue;
+					var slot = this.slots[idx - 1];
+					var usage = data.timeslots[tn];
+					if (usage === 'assigned') slot.setBusy();
+					else if (usage === 'unallocated') slot.setIdle();
+				}
+			}
 
 		} else if (type === 'call_setup' || type === 'call_connect' || type === 'tx_grant') {
-			var si2 = (data.slot || 0);
-			if (si2 >= 0 && si2 < this.slots.length) this.slots[si2].update(data);
+			// Bug 16 fix: backend doesn't tag calls with TN. Route the
+			// call to whichever slot(s) are currently flagged 'assigned'
+			// in the latest burst. Fallback to TS1 if none seen yet.
+			var targets = this._assignedSlots();
+			if (targets.length === 0) targets = [1];
+			for (var t = 0; t < targets.length; t++) {
+				this.slots[targets[t] - 1].update(data);
+			}
 			Plugins.tetra._setEnc(!!data.encrypted, data.encryption_type || 'none');
 
 		} else if (type === 'call_release') {
@@ -207,6 +263,7 @@ Plugins.tetra._registerMetaPanel = function () {
 		Plugins.tetra._setEnc(null, null);
 		$('#tetra-last-status').addClass('idle').text('---');
 		$('#tetra-last-sds').addClass('idle').text('---');
+		this._lastTimeslots = {};
 		for (var i = 0; i < this.slots.length; i++) this.slots[i].clear();
 	};
 
@@ -240,7 +297,7 @@ Plugins.tetra._setCellSec = function (cellTea, cellSc) {
 };
 
 /**
- * Per-call active encryption from Basicinfo enc_mode bits (1/2/3 = TEA1/2/3).
+ * Per-call active encryption from per-call ENCR (1/2/3 = TEA1/2/3).
  *  encrypted=true            -> red 'TEA2 (active)' / 'ENC YES'
  *  encrypted=false (in call) -> green 'Clear'
  *  encrypted=null            -> dim 'idle' (no call active)
